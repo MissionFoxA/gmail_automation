@@ -8,6 +8,10 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from openai import OpenAI
+import sqlite3
+from datetime import datetime
+
+
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
@@ -38,11 +42,42 @@ Reply with JSON only, like: {"importance": "important" | "normal" | "needs_revie
 INJECTION_PATTERNS = [
     r"ignore\s+(all\s+)?(your\s+|the\s+)?(previous|prior|above)\s+instructions",
     r"disregard\s+(all\s+)?(your\s+|the\s+)?(previous|prior|above)",
+    r"disregard\s+(what\s+i\s+said|everything|the\s+above)",
+    r"forget\s+(everything|all)\b",
+    r"you\s+are\s+now\s+(a|an|the|my)\b",
     r"mark\s+(this\s+email|the\s+email|this|it)\s+(as\s+)?important",
-    r"(classify|label)\s+(this|it)\s+as",
+    r"mark\s+(every|all|each)\s+(email|message)s?\s+(as\s+)?important",
+    r"(classify|label)\s+(this\s+email|the\s+email|this|it)\s+as\b",
     r"system\s+prompt",
 ]
 
+DB_FILE = "emails.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS emails (
+            id TEXT PRIMARY KEY,
+            sender TEXT,
+            subject TEXT,
+            received TEXT,
+            importance TEXT,
+            reason TEXT,
+            classified_at TEXT
+        )
+    """)
+    conn.commit()
+    return conn
+
+def save_result(conn, email, result):
+    conn.execute(
+        "INSERT OR REPLACE INTO emails VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (email["id"], email["sender"], email["subject"], email["date"],
+         result["importance"], result["reason"],
+         datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    
 def looks_like_injection(subject, body):
     text = f"{subject}\n{body}".lower()       # lowercase so the patterns match any capitalisation
     return any(re.search(pattern, text) for pattern in INJECTION_PATTERNS)
@@ -98,7 +133,7 @@ def classify_with_llm(sender, subject, body):
     if looks_like_injection(subject, body):
         return {"importance": "needs_review", "reason": "possible prompt injection detected"}
     response = client.chat.completions.create(
-        model="llama3.2",
+        model="llama3.1:8b",
         messages=[
             {"role": "system", "content": PROMPT},
             {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body[:3000]}"},
@@ -116,11 +151,22 @@ def classify_with_llm(sender, subject, body):
 
 if __name__ == "__main__":
     service = get_service()
+    conn = init_db()
     ids = list_todays_message_ids(service)
     print(f"Found {len(ids)} messages from the last day")
 
-    # Only the first five while testing, to keep things quick and cheap
     for msg_id in ids[:20]:
         email = get_message_details(service, msg_id)
         result = classify_with_llm(email["sender"], email["subject"], email["body"])
-        print(f"{email['subject']!r} -> {result}")
+        save_result(conn, email, result)
+        print(f"{email['subject']!r} -> {result['importance']}")
+
+    print("\nImportant emails:")
+    rows = conn.execute(
+        "SELECT sender, subject, reason FROM emails "
+        "WHERE importance = 'important' ORDER BY classified_at DESC"
+    ).fetchall()
+    for sender, subject, reason in rows:
+        print(f"- {subject} (from {sender}): {reason}")
+
+    conn.close()
