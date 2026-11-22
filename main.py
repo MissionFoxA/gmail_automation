@@ -76,7 +76,7 @@ def classify_with_llm(sender, subject, body):
             {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body[:3000]}"},
         ],
     )
-    reply = response.choices[0].message.content
+    reply = response.choices[0].message.content or ""
     try:
         result = json.loads(reply)
         if result["importance"] in ("important", "normal"):
